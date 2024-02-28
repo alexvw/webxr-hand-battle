@@ -1,0 +1,870 @@
+<!doctype html>
+
+<html>
+
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no'>
+  <meta name='mobile-web-app-capable' content='yes'>
+  <meta name='apple-mobile-web-app-capable' content='yes'>
+  <link rel='icon' type='image/png' sizes='32x32' href='./favicon-32x32.png'>
+  <link rel='icon' type='image/png' sizes='96x96' href='./favicon-96x96.png'>
+  <link rel='stylesheet' href='./css/common.css'>
+
+  <title>Immersive Session with hands</title>
+</head>
+
+<body>
+  <header>
+    <details open>
+      <summary>Immersive VR Session with hands</summary>
+      <p>airpwane go wheeee
+        <a class="back" href="./">Back</a>
+      </p>
+    </details>
+  </header>
+  <main style='text-align: center;'>
+    <p>Click 'Enter XR' to see content</p>
+  </main>
+  <script type="module">
+    import { WebXRButton } from './js/util/webxr-button.js';
+    import { Scene } from './js/render/scenes/scene.js';
+    import { Node } from './js/render/core/node.js';
+    import { Renderer, createWebGLContext } from './js/render/core/renderer.js';
+    import { Gltf2Node } from './js/render/nodes/gltf2.js';
+    import { SkyboxNode } from './js/render/nodes/skybox.js';
+    import { BoxBuilder } from './js/render/geometry/box-builder.js';
+    import { PbrMaterial } from './js/render/materials/pbr.js';
+    import { QueryArgs } from './js/util/query-args.js';
+    import {mat4} from './js/render/math/gl-matrix.js';
+    import {vec3} from './js/render/math/gl-matrix.js';
+    import {Ray} from './js/render/math/ray.js';
+    import { quat } from './js/render/math/gl-matrix.js';
+
+    // XR globals.
+    let xrButton = null;
+    let xrRefSpace = null;
+    let isAR = false;
+    let radii = new Float32Array(25);
+    let positions = new Float32Array(16*25);
+
+    let redBoxNode = null; // This will hold the reference to the red box
+    let trailParticles = [];
+    let lastFrameTime = 0; // Global variable to track the last frame time
+    
+    // Boxes
+    let boxes_left = [];
+    let boxes_right = [];
+    let boxes = { left: boxes_left, right: boxes_right };
+    let indexFingerBoxes = { left: null, right: null };
+    const defaultBoxColor = {r: 0.5, g: 0.5, b: 0.5};
+    const leftBoxColor = {r: 1, g: 0, b: 1};
+    const rightBoxColor = {r: 0, g: 1, b: 1};
+    let interactionBox = null;
+    let leftInteractionBox = null;
+    let rightInteractionBox = null;
+    let fingertipBoxes = { left: {}, right: {} };
+
+    let skyboxNode = new SkyboxNode({ url: './media/textures/milky-way-4k.png' });
+
+    // WebGL scene globals.
+    let gl = null;
+    let renderer = null;
+    let scene = new Scene();
+    scene.addNode(new Gltf2Node({ url: './media/gltf/space/space.gltf' }));
+    //scene.addNode(skyboxNode);
+
+    let audioContext;
+    let spaceSoundBuffer;
+    let spaceshipSoundBuffer;
+
+    let spaceshipSoundSource;
+
+    let panner;
+
+
+    let sessionType = ''; // Track the session type globally
+
+    function loadSpaceSound() {
+        if (!window.AudioContext) {
+            console.warn('Web Audio API is not supported in this browser');
+            return;
+        }
+        audioContext = new AudioContext();
+        fetch('./media/sound/space.ogg')
+            .then(response => response.arrayBuffer())
+            .then(arrayBuffer => audioContext.decodeAudioData(arrayBuffer))
+            .then(decodedAudio => {
+                spaceSoundBuffer = decodedAudio;
+            })
+            .catch(error => console.error('Error loading sound:', error));
+        fetch('./media/sound/saw.ogg')
+            .then(response => response.arrayBuffer())
+            .then(arrayBuffer => audioContext.decodeAudioData(arrayBuffer))
+            .then(decodedAudio => {
+              spaceshipSoundBuffer = decodedAudio;
+
+              
+              panner = audioContext.createPanner();
+              panner.panningModel = 'HRTF';
+              panner.distanceModel = 'inverse';
+              panner.refDistance = 1;
+              panner.maxDistance = 10000;
+              panner.rolloffFactor = 1;
+              panner.coneInnerAngle = 360;
+              panner.coneOuterAngle = 0;
+              panner.coneOuterGain = 0;
+
+              spaceshipSoundSource = audioContext.createBufferSource();
+              spaceshipSoundSource.buffer = spaceshipSoundBuffer;
+            })
+            .catch(error => console.error('Error loading sound:', error));
+
+    }
+    
+    function createBoxPrimitive(r, g, b) {	
+      let boxBuilder = new BoxBuilder();	
+      boxBuilder.pushCube([0, 0, 0], 1);	
+      let boxPrimitive = boxBuilder.finishPrimitive(renderer);	
+      let boxMaterial = new PbrMaterial();	
+      boxMaterial.baseColorFactor.value = [r, g, b, 1];	
+      return renderer.createRenderPrimitive(boxPrimitive, boxMaterial);	
+    }
+
+    function addBox(x, y, z, r, g, b, offset) {
+      let boxRenderPrimitive = createBoxPrimitive(r, g, b);
+      let boxNode = new Node();
+      boxNode.addRenderPrimitive(boxRenderPrimitive);
+      // Marks the node as one that needs to be checked when hit testing.
+      boxNode.selectable = true;
+      return boxNode;
+    }
+
+    function addBoxWithRotation(x, y, z, r, g, b, rotation) {
+        let boxRenderPrimitive = createBoxPrimitive(r, g, b);
+        let boxNode = new Node();
+        boxNode.addRenderPrimitive(boxRenderPrimitive);
+        boxNode.selectable = true; // Marks the node as one that needs to be checked when hit testing.
+
+        // Set the position and rotation of the box
+        boxNode.translation = [x, y, z];
+        boxNode.rotation = rotation; // This rotation should be a quaternion
+
+        scene.addNode(boxNode); // Add the box to the scene
+        return boxNode;
+    }
+
+    function initHands() {
+      // Clear existing boxes
+      for (const box of boxes_left) {
+        scene.removeNode(box);
+      }
+      for (const box of boxes_right) {
+        scene.removeNode(box);
+      }
+      boxes_left = [];
+      boxes_right = [];
+      boxes = { left: boxes_left, right: boxes_right };
+
+      // Store fingertip boxes in a new structure
+      fingertipBoxes = { left: {}, right: {} }; // Add this line
+
+      if (typeof XRHand !== 'undefined') {
+        for (let i = 0; i <= 24; i++) {
+          let r = .3;
+          let g = .3;
+          let b = .3;
+          let boxLeft = null;
+          let boxRight = null;
+
+          //something is way wrong with how these are assigned but im too dumb to figure it out so far
+          if ([4, 9, 14, 19, 24].includes(i)) { // Indexes for fingertips
+            let fingerNames = ['thumb', 'index', 'middle', 'ring', 'pinky'];
+            let fingerIndex = [4, 9, 14, 19, 24].indexOf(i); // Find the index of i in the fingertips array
+            let fingerName = fingerNames[fingerIndex]; // Use the found index to get the correct finger name
+            
+            r = .5;
+            g = .7;
+            b = .2;
+            boxLeft = addBox(0, 0, 0, r, g, b);
+            boxRight = addBox(0, 0, 0, r, g, b);
+            // Assign the fingertip boxes to fingertipBoxes object for both hands
+            fingertipBoxes.left[fingerName] = boxLeft;
+            fingertipBoxes.right[fingerName] = boxRight;
+            
+          }else{
+            boxLeft = addBox(0, 0, 0, r, g, b);
+            boxRight = addBox(0, 0, 0, r, g, b);
+          }
+
+          boxes_left.push(boxLeft);
+          boxes_right.push(boxRight);
+        }
+      }
+    }
+
+    let thumbIndexTouching = false;
+    let thumbPinkyTouching = false;
+    let threeOrMoreFingersTouchingThumb = false;
+
+    function checkFingerTipsTouchingThumb(frame, inputSource, xrRefSpace) {
+        const touching = { thumb: false, index: false, middle: false, ring: false, pinky: false };
+        const thumbTip = inputSource.hand.get('thumb-tip');
+        const thumbTipPose = frame.getJointPose(thumbTip, xrRefSpace);
+
+        if (!thumbTipPose) {
+            return touching;
+        }
+
+        const fingerTips = ['index-finger-tip', 'middle-finger-tip', 'ring-finger-tip', 'pinky-finger-tip'];
+        let touchingCount = 0; // Track the number of fingers touching the thumb
+
+        fingerTips.forEach((fingerTipName, index) => {
+            const fingerTip = inputSource.hand.get(fingerTipName);
+            const fingerTipPose = frame.getJointPose(fingerTip, xrRefSpace);
+
+            if (fingerTipPose) {
+                const distance = Math.sqrt(
+                    Math.pow(thumbTipPose.transform.position.x - fingerTipPose.transform.position.x, 2) +
+                    Math.pow(thumbTipPose.transform.position.y - fingerTipPose.transform.position.y, 2) +
+                    Math.pow(thumbTipPose.transform.position.z - fingerTipPose.transform.position.z, 2)
+                );
+
+                const threshold = 0.02; // Adjust based on your requirements
+                if (distance < threshold) {
+                    const fingerName = Object.keys(touching)[index + 1]; // +1 to account for thumb being the first key
+                    touching[fingerName] = true;
+                    touchingCount++;
+                }
+            }
+        });
+
+        // Update global booleans based on the touching status
+        thumbIndexTouching = touching.index;
+        thumbPinkyTouching = touching.pinky;
+        threeOrMoreFingersTouchingThumb = touchingCount >= 3;
+
+        return touching;
+    }
+
+    // Checks to see if WebXR is available and, if so, queries a list of
+    // XRDevices that are connected to the system.
+    function initXR() {
+      // Adds a helper button to the page that indicates if any XRDevices are
+      // available and let's the user pick between them if there's multiple.
+      xrButton = new WebXRButton({
+        onRequestSession: onRequestSession,
+        onEndSession: onEndSession
+      });
+      document.querySelector('header').appendChild(xrButton.domElement);
+
+      // Is WebXR available on this UA?
+      if (navigator.xr) {
+        // If the device allows creation of exclusive sessions set it as the
+        // target of the 'Enter XR' button.
+        navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+          if (supported)
+            xrButton.enabled = supported;
+          else
+            navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+              isAR = true;
+              xrButton.enabled = supported;
+            });
+        });
+      }
+    }
+
+    // Called when the user selects a device to present to. In response we
+    // will request an exclusive session from that device.
+    /*
+    function onRequestSession() {
+      return navigator.xr.requestSession(isAR?'immersive-ar':'immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'] }).then(onSessionStarted);
+    }
+
+    */
+
+    // Revised onRequestSession to handle existing sessions
+    async function onRequestSession() {
+      // Check if there's an existing session and end it before creating a new one
+      if (xrButton.session) {
+        await xrButton.session.end();
+      }
+
+      // Try AR session first
+      navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+        if (supported) {
+          sessionType = 'AR';
+          navigator.xr.requestSession('immersive-ar', {
+            requiredFeatures: ['local-floor', 'bounded-floor', 'hit-test', 'hand-tracking']
+          }).then(onSessionStarted).catch(err => {
+            console.error(`Failed to start AR session: ${err}`);
+            // If AR fails, fall back to VR
+            xrButton.session.end();
+            requestVRSession();
+          });
+        } else {
+          // AR not supported, fall back to VR
+          requestVRSession();
+        }
+      }).catch(err => {
+        console.error(`Error checking session support: ${err}`);
+        // If checking support fails, attempt to start a VR session as a fallback
+        requestVRSession();
+      });
+    }
+
+    function requestVRSession() {
+      navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+        if (supported) {
+          sessionType = 'VR';
+          navigator.xr.requestSession('immersive-vr', {
+            optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+          }).then(onSessionStarted).catch(err => {
+            console.error(`Failed to start VR session: ${err}`);
+          });
+        } else {
+          console.log('VR not supported');
+        }
+      });
+    }
+
+
+
+    // Called when we've successfully acquired a XRSession. In response we
+    // will set up the necessary session state and kick off the frame loop.
+    function onSessionStarted(session) {
+      // This informs the 'Enter XR' button that the session has started and
+      // that it should display 'Exit XR' instead.
+      xrButton.setSession(session);
+      
+      loadSpaceSound();
+
+      // Listen for the sessions 'end' event so we can respond if the user
+      // or UA ends the session for any reason.
+      session.addEventListener('end', onSessionEnded);
+
+      session.addEventListener('visibilitychange', e => {
+        // remove hand controller while blurred
+        if(e.session.visibilityState === 'visible-blurred') {
+          for (const box of boxes['left']) {
+            scene.removeNode(box);
+          }
+          for (const box of boxes['right']) {
+            scene.removeNode(box);
+          }
+        }
+      });
+
+      // Create a WebGL context to render with, initialized to be compatible
+      // with the XRDisplay we're presenting to.
+      gl = createWebGLContext({
+        xrCompatible: true
+      });
+
+      // Create a renderer with that GL context (this is just for the samples
+      // framework and has nothing to do with WebXR specifically.)
+      renderer = new Renderer(gl);
+
+      initHands();
+
+      // Set the scene's renderer, which creates the necessary GPU resources.
+      scene.setRenderer(renderer);
+
+      // Use the new WebGL context to create a XRWebGLLayer and set it as the
+      // sessions baseLayer. This allows any content rendered to the layer to
+      // be displayed on the XRDevice.
+      session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+
+      // Get a frame of reference, which is required for querying poses. In
+      // this case an 'local' frame of reference means that all poses will
+      // be relative to the location where the XRDevice was first detected.
+      session.requestReferenceSpace('local').then((refSpace) => {
+        xrRefSpace = refSpace.getOffsetReferenceSpace(new XRRigidTransform({ x: 0, y: 0, z: 0 }));
+
+        // Inform the session that we're ready to begin drawing.
+        session.requestAnimationFrame(onXRFrame);
+      });
+      
+      
+      setTimeout(startSound, 2000);
+
+      // Check session type and add/remove skybox accordingly
+      if (sessionType === 'VR') {
+          scene.addNode(skyboxNode);
+      } else if (sessionType === 'AR') {
+          //scene.removeNode(skyboxNode);
+      }
+    }
+
+    function startSound(){
+      
+      // Play the space sound
+      if (audioContext && spaceSoundBuffer && spaceshipSoundBuffer) {
+          
+          let source = audioContext.createBufferSource();
+          source.buffer = spaceSoundBuffer;
+          source.connect(audioContext.destination);
+          source.start(0); // Play immediately
+
+          spaceshipSoundSource.connect(panner);
+          panner.connect(audioContext.destination);
+
+          //spaceshipSoundSource.loop = true;
+          //spaceshipSoundSource.start(0);
+      } else {
+          console.log("Sound buffer is not loaded or audio context is not initialized.");
+      }
+    }
+
+    function updateSpaceshipSoundPosition(x, y, z) {
+        panner.positionX.setValueAtTime(x, audioContext.currentTime);
+        panner.positionY.setValueAtTime(y, audioContext.currentTime);
+        panner.positionZ.setValueAtTime(z, audioContext.currentTime);
+    }
+
+    // Called when the user clicks the 'Exit XR' button. In response we end
+    // the session.
+    function onEndSession(session) {
+      session.end();
+    }
+
+    // Called either when the user has explicitly ended the session (like in
+    // onEndSession()) or when the UA has ended the session for any reason.
+    // At this point the session object is no longer usable and should be
+    // discarded.
+    function onSessionEnded(event) {
+      xrButton.setSession(null);
+
+      // In this simple case discard the WebGL context too, since we're not
+      // rendering anything else to the screen with it.
+      renderer = null;
+    }
+
+    function updateInputSources(session, frame, refSpace, deltaTime) {
+      
+      if(session.visibilityState === 'visible-blurred') {
+        return;
+      }
+      for (let inputSource of session.inputSources) {
+        /*
+        let targetRayPose = frame.getPose(inputSource.targetRaySpace, refSpace);
+        if (targetRayPose) {
+          if (inputSource.targetRayMode == 'tracked-pointer') {
+            scene.inputRenderer.addLaserPointer(targetRayPose.transform);
+          }
+
+          let targetRay = new Ray(targetRayPose.transform);
+          let cursorDistance = 2.0;
+          let cursorPos = vec3.fromValues(
+              targetRay.origin.x,
+              targetRay.origin.y,
+              targetRay.origin.z
+              );
+          vec3.add(cursorPos, cursorPos, [
+              targetRay.direction.x * cursorDistance,
+              targetRay.direction.y * cursorDistance,
+              targetRay.direction.z * cursorDistance,
+              ]);
+
+          scene.inputRenderer.addCursor(cursorPos);
+        }
+        */
+
+        let offset = 0;
+        if (!inputSource.hand) {
+          console.log("no hand");
+          continue;
+        } else {
+          for (const box of boxes[inputSource.handedness]) {
+            scene.removeNode(box);
+          }
+
+          let pose = frame.getPose(inputSource.targetRaySpace, refSpace);
+          if (pose === undefined) {
+            console.log("no pose");
+          }
+
+          if (!frame.fillJointRadii(inputSource.hand.values(), radii)) {
+            
+            continue;
+          }
+          if (!frame.fillPoses(inputSource.hand.values(), refSpace, positions)) {
+            console.log("no fillPoses");
+            continue;
+          }
+          // Assuming you've already populated fingertipBoxes in initHands function
+          const hand = inputSource.handedness; 
+          //console.log("hand bones");
+          for (const box of boxes[inputSource.handedness]) {
+            scene.addNode(box);
+            let matrix = positions.slice(offset * 16, (offset + 1) * 16);
+            let jointRadius = radii[offset];
+            offset++;
+            mat4.getTranslation(box.translation, matrix);
+            mat4.getRotation(box.rotation, matrix);
+            box.scale = [jointRadius, jointRadius, jointRadius];
+          }
+          	
+          // Update to use fingertipBoxes for index finger
+          const indexFingerBox = fingertipBoxes[hand].index;
+          if (indexFingerBox) {
+            let joint = inputSource.hand.get('index-finger-tip');
+            let jointPose = frame.getJointPose(joint, xrRefSpace);
+            if (jointPose) {
+              let matrix = jointPose.transform.matrix;
+              mat4.getTranslation(indexFingerBox.translation, matrix);
+              mat4.getRotation(indexFingerBox.rotation, matrix);
+              indexFingerBox.scale = [0.02, 0.02, 0.02]; // Adjust as necessary
+            }
+          }
+
+            if (inputSource.hand && inputSource.handedness === 'right') {
+
+                //I only want to call this every 10 frames
+                if (frameCounter % 10 === 0) {
+                  const touchingMap = checkFingerTipsTouchingThumb(frame, inputSource, xrRefSpace);
+                  if (thumbIndexTouching) {
+                    console.log("Thumb and index finger are touching.");
+                  }
+                  if (thumbPinkyTouching) {
+                    console.log("Thumb and pinky finger are touching.");
+                  }
+                  if (threeOrMoreFingersTouchingThumb) {
+                    console.log("Three or more fingers are touching the thumb.");
+                  }
+                }
+                
+                const palmJoints = ["wrist", "thumb-metacarpal", "index-finger-metacarpal", 
+                                    "middle-finger-metacarpal", "ring-finger-metacarpal", 
+                                    "pinky-finger-metacarpal"];
+                let quaternions = [];
+
+                palmJoints.forEach(jointName => {
+                    let joint = inputSource.hand.get(jointName);
+                    if (joint) {
+                        let jointPose = frame.getJointPose(joint, refSpace);
+                        if (jointPose && jointPose.transform.orientation) {
+                            // Convert DOMPointReadOnly to an array of numbers
+                            let quaternion = [
+                                jointPose.transform.orientation.x,
+                                jointPose.transform.orientation.y,
+                                jointPose.transform.orientation.z,
+                                jointPose.transform.orientation.w
+                            ];
+                            quaternions.push(quaternion);
+                        }
+                    }
+                });
+
+                // Use the simplified version for efficiency
+                const averageQuat = simpleAverageQuaternion(quaternions);
+                const { roll, pitch, yaw } = quaternionToEuler(averageQuat);
+
+                // Use roll, pitch, and yaw for your visualization or further processing
+                // For example, updating a gyroscope display:
+                //console.log("Roll: ", roll, "Pitch: ", pitch, "Yaw: ", yaw);
+                updateGyroscopeDisplay(roll, pitch, yaw, deltaTime);
+                
+                //Update and render trail particles
+                updateTrailParticles(deltaTime);
+            }
+        }
+      }
+    }
+
+    function updateGyroscopeDisplay(roll, pitch, yaw, deltaTime) {
+        // Convert Euler angles (in radians) to a quaternion
+        let orientation = quat.create();
+        quat.fromEuler(orientation, roll * (180 / Math.PI), pitch * (180 / Math.PI), yaw * (180 / Math.PI));
+
+        // Assuming the cube is placed 2 units in front of the user
+        updateOrCreateRedBoxWithRotation(1, -0.5, 0, orientation, deltaTime);
+    }
+    
+    function UpdateInteractables(time) {
+      // Add scene objects if not present
+      /*
+      if (!interactionBox) {	
+        // Add box to demonstrate hand interaction
+        
+        function AddInteractionBox(r, g, b) {	
+          let box = new Node();	
+          box.addRenderPrimitive(createBoxPrimitive(r, g, b));	
+          box.translation = [0, 0, -0.65];	
+          box.scale = [0.25, 0.25, 0.25];	
+          return box;	
+        }	
+        interactionBox = AddInteractionBox(defaultBoxColor.r, defaultBoxColor.g, defaultBoxColor.b);	
+        leftInteractionBox = AddInteractionBox(leftBoxColor.r, leftBoxColor.g, leftBoxColor.b);	
+        rightInteractionBox = AddInteractionBox(rightBoxColor.r, rightBoxColor.g, rightBoxColor.b);	
+        scene.addNode(interactionBox);	
+        scene.addNode(leftInteractionBox);	
+        scene.addNode(rightInteractionBox);	
+      }
+      */
+      
+      function Distance(nodeA, nodeB) {	
+        return Math.sqrt(	
+          Math.pow(nodeA.translation[0] - nodeB.translation[0], 2) +	
+          Math.pow(nodeA.translation[1] - nodeB.translation[1], 2) +	
+          Math.pow(nodeA.translation[2] - nodeB.translation[2], 2));	
+      }
+
+      /*
+      // Perform distance check on interactable elements
+      const interactionDistance = interactionBox.scale[0];	
+      leftInteractionBox.visible = false;	
+      rightInteractionBox.visible = false;	
+      if (Distance(indexFingerBoxes.left, interactionBox) < interactionDistance) {	
+        leftInteractionBox.visible = true;	
+      } else if (Distance(indexFingerBoxes.right, interactionBox) < interactionDistance) {	
+        rightInteractionBox.visible = true;	
+      }	
+      interactionBox.visible = !(leftInteractionBox.visible || rightInteractionBox.visible);
+      
+      mat4.rotateX(interactionBox.matrix, interactionBox.matrix, time/1000);
+      mat4.rotateY(interactionBox.matrix, interactionBox.matrix, time/1500);
+      leftInteractionBox.matrix = interactionBox.matrix;
+      rightInteractionBox.matrix = interactionBox.matrix;
+      */
+
+    }
+
+    function simpleAverageQuaternion(quaternions) {
+        //console.log("Quaternions for averaging:", quaternions);
+        if (quaternions.length === 0) return [0, 0, 0, 1];
+
+        let sum = quaternions.reduce((acc, q) => {
+            acc[0] += q[0];
+            acc[1] += q[1];
+            acc[2] += q[2];
+            acc[3] += q[3];
+            return acc;
+        }, [0, 0, 0, 0]);
+
+        let magnitude = Math.sqrt(sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2] + sum[3] * sum[3]);
+        let normalized = sum.map(el => el / magnitude);
+        //console.log("Averaged Quaternion:", normalized);
+        return normalized;
+    }
+
+    function updateOrCreateRedBoxWithRotation(x, y, z, orientation, deltaTime) {
+        const widthLengthScale = 0.2; // Scale for width and length (x and z dimensions)
+        const heightScale = 0.05; // Scale for height (y dimension), making it a pancake shape
+        const moveSpeed = 0.3; // Speed of the box, adjust as needed
+
+        if (!redBoxNode) {
+            // Box does not exist, create it
+            let boxRenderPrimitive = createBoxPrimitive(0, 1, 1); // Red box
+            redBoxNode = new Node();
+            redBoxNode.addRenderPrimitive(boxRenderPrimitive);
+            redBoxNode.translation = [x, y, z];
+            //console.log("Created at x: "+x+" y: "+y+" z: "+z);
+            redBoxNode.rotation = orientation;
+            redBoxNode.scale = [widthLengthScale, heightScale, widthLengthScale]; // Set the initial scale of the box to be pancake-like
+            scene.addNode(redBoxNode); // Add the new box to the scene
+        } else {
+            // Box already exists, just update its properties
+            redBoxNode.rotation = orientation;
+            //console.log(`Orientation: ${orientation}`);
+            redBoxNode.scale = [widthLengthScale, heightScale, widthLengthScale]; // Adjust the scale of the box to be pancake-like
+            //console.log(`Initial x: ${x}, y: ${y}, z: ${z}`);
+
+            // Calculate the forward vector based on the box's current orientation
+            let forward = vec3.fromValues(0, 0, -1); // Assuming this is the forward direction
+            vec3.transformQuat(forward, forward, orientation); // Apply quaternion rotation
+            //console.log(`Forward after rotation: ${forward}`);
+            //console.log(`deltaTime: ${deltaTime}`);
+            // Scale the forward vector by the move speed and deltaTime to calculate the movement vector
+            let movementVector = vec3.scale(vec3.create(), forward, moveSpeed * deltaTime);
+
+            // Update the box's position by adding the movement vector to its current translation
+            vec3.add(redBoxNode.translation, redBoxNode.translation, movementVector);
+
+            // After updating the red box's position
+            let boxPosition = vec3.clone(redBoxNode.translation); // Clone to avoid modifying the original position
+            //addTrailParticle(boxPosition);
+
+            //updateSpaceshipSoundPosition(redBoxNode.translation[0], redBoxNode.translation[1], redBoxNode.translation[2]);
+
+            //console.log(`Updated position to x: ${redBoxNode.translation[0]} y: ${redBoxNode.translation[1]} z: ${redBoxNode.translation[2]}`);
+        }
+    }
+
+    function quaternionToEuler(quaternion) {
+        //console.log("Quaternion to Euler, input quaternion:", quaternion); // Debug log
+        let ysqr = quaternion[1] * quaternion[1];
+
+        let t0 = +2.0 * (quaternion[3] * quaternion[0] + quaternion[1] * quaternion[2]);
+        let t1 = +1.0 - 2.0 * (quaternion[0] * quaternion[0] + ysqr);
+        let roll = Math.atan2(t0, t1);
+
+        let t2 = +2.0 * (quaternion[3] * quaternion[1] - quaternion[2] * quaternion[0]);
+        t2 = t2 > +1.0 ? +1.0 : t2;
+        t2 = t2 < -1.0 ? -1.0 : t2;
+        let pitch = Math.asin(t2);
+
+        let t3 = +2.0 * (quaternion[3] * quaternion[2] + quaternion[0] * quaternion[1]);
+        let t4 = +1.0 - 2.0 * (ysqr + quaternion[2] * quaternion[2]);  
+        let yaw = Math.atan2(t3, t4);
+
+        //console.log(`Roll: ${roll}, Pitch: ${pitch}, Yaw: ${yaw}`); // Debug log
+        if(isNaN(roll) || isNaN(pitch) || isNaN(yaw)) {
+            console.error("Invalid roll, pitch, or yaw calculated from quaternion", quaternion);
+        }
+
+        return { roll, pitch, yaw };
+    }
+
+
+    function addTrailParticle(position) {
+        let particleMaterial = new PbrMaterial();
+        // Start with bright red
+        particleMaterial.baseColorFactor.value = [1, 0, 0, 1]; // RGBA
+        particleMaterial.emissiveFactor.value = [1, 0, 0]; // Start as bright red emissive
+
+        let boxBuilder = new BoxBuilder();
+        boxBuilder.pushCube([0, 0, 0], 0.1); // Initial size of the cube
+        let boxPrimitive = boxBuilder.finishPrimitive(renderer);
+        
+        // Ensure the material is correctly associated with the render primitive
+        let boxRenderPrimitive = renderer.createRenderPrimitive(boxPrimitive, particleMaterial);
+
+        let particleNode = new Node();
+        particleNode.addRenderPrimitive(boxRenderPrimitive);
+        particleNode.translation = position;
+
+        // Add the node to the scene
+        scene.addNode(particleNode);
+
+        let particle = {
+            node: particleNode,
+            material: particleMaterial, // Keep a direct reference to the material for easy access
+            lifetime: 3.0, // Lifetime in seconds
+            elapsedTime: 0,
+            initialScale: [1, 1, 1], // Initial scale of the particle
+            update: function(deltaTime) {
+                this.elapsedTime += deltaTime;
+                const lifeRatio = 1 - (this.elapsedTime / this.lifetime);
+
+                // Update the scale based on lifeRatio
+                this.node.scale = this.initialScale.map(s => s * lifeRatio);
+
+                // Directly update the material's color
+                //TODO this does not work
+                //const greenComponent = (1 - lifeRatio) * 1; // Gradually increase green
+                //this.material.baseColorFactor.value = [1, greenComponent, 0, 1];
+                //this.material.emissiveFactor.value = [1, greenComponent, 0];
+
+                if (this.elapsedTime >= this.lifetime) {
+                    // Time to remove the particle
+                    scene.removeNode(this.node);
+                    return false; // Indicates the particle should be removed from the array
+                }
+                return true; // The particle is still alive
+            }
+        };
+        trailParticles.push(particle);
+    }
+
+
+
+
+    function updateTrailParticles(deltaTime) {
+        for (let i = trailParticles.length - 1; i >= 0; i--) {
+            if (!trailParticles[i].update(deltaTime)) {
+                // Particle indicated it should be removed
+                trailParticles.splice(i, 1);
+            }
+        }
+    }
+
+    let frameCounter = 0;
+    // Called every time the XRSession requests that a new frame be drawn.
+    function onXRFrame(t, frame) {
+        let session = frame.session;
+        frameCounter++;
+
+        // Calculate deltaTime in milliseconds
+        let currentTime = t; // Assuming 't' is in milliseconds provided by requestAnimationFrame
+        if (lastFrameTime === 0) lastFrameTime = currentTime; // Initialize lastFrameTime if it's the first frame
+        let deltaTime = (currentTime - lastFrameTime) / 1000.0; // Convert to seconds
+        
+        // Update the last frame time
+        lastFrameTime = currentTime;
+
+        // Per-frame scene setup. Nothing WebXR specific here.
+        scene.startFrame();
+
+        // Inform the session that we're ready for the next frame.
+        session.requestAnimationFrame(onXRFrame);
+
+        updateInputSources(session, frame, xrRefSpace, deltaTime);
+        UpdateInteractables(t);
+
+        if (frameCounter >= 30) {
+            // Reset frame counter
+            frameCounter = 0;
+
+            // Assuming you have a way to get the current position of the box
+            // For example, if redBoxNode holds your box, you can use its position
+            if (redBoxNode) {
+                // Position the trail particle slightly behind the box
+                let boxPosition = vec3.clone(redBoxNode.translation);
+                let backward = vec3.fromValues(0, 0, -0.22); // Move the particle slightly backward
+                vec3.transformQuat(backward, backward, redBoxNode.rotation); // Adjust according to box's rotation
+                vec3.subtract(boxPosition, boxPosition, backward); // Apply backward offset
+
+                addTrailParticle(boxPosition);
+            }
+        }
+
+
+        // Get the XRDevice pose relative to the Frame of Reference we created earlier.
+        let pose = frame.getViewerPose(xrRefSpace);
+
+        if (pose) {
+            let glLayer = session.renderState.baseLayer;
+            gl.bindFramebuffer(gl.FRAMEBUFFER, glLayer.framebuffer);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+            for (let view of pose.views) {
+                let viewport = glLayer.getViewport(view);
+                gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+
+                // Draw this view of the scene
+                scene.draw(view.projectionMatrix, view.transform);
+            }
+        }
+
+        // Per-frame scene teardown. Nothing WebXR specific here.
+        scene.endFrame();
+    }
+    // Start the XR application.
+    initXR();
+    loadSpaceSound();
+
+    class TrailParticle {
+        constructor(node, lifetime = 5.0, initialScale = [0.1, 0.1, 0.1]) { // Small initial scale
+            this.node = node;
+            this.lifetime = lifetime;
+            this.elapsedTime = 0;
+            this.initialScale = initialScale;
+        }
+
+        update(deltaTime) {
+            this.elapsedTime += deltaTime;
+            const scale = Math.max(0, 1 - (this.elapsedTime / this.lifetime)); // Scale down to 0 over lifetime
+
+            // Update the box's scale to simulate fading
+            this.node.scale = this.initialScale.map(s => s * scale);
+
+            // Return false if lifetime is over (scale <= 0), indicating the particle should be removed
+            return scale > 0;
+        }
+    }
+
+  </script>
+</body>
+
+</html>
