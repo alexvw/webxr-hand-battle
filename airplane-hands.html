@@ -18,7 +18,7 @@
   <header>
     <details open>
       <summary>Immersive VR Session with hands</summary>
-      <p>airpwane go wheeee
+      <p>ship go BOOM
         <a class="back" href="./">Back</a>
       </p>
     </details>
@@ -81,6 +81,9 @@
     let spaceshipSoundSource;
 
     let panner;
+
+    let missiles = [];
+    let lastMissileLaunchTime = 0;
 
 
     let sessionType = ''; // Track the session type globally
@@ -243,6 +246,29 @@
         thumbIndexTouching = touching.index;
         thumbPinkyTouching = touching.pinky;
         threeOrMoreFingersTouchingThumb = touchingCount >= 3;
+
+        // Check if thumb and index are touching and if cooldown has passed (1 second = 1000 milliseconds)
+        if (thumbIndexTouching && (performance.now() - lastMissileLaunchTime > 1000)) {
+          // Get the wrist joint pose for direction
+          const wristJoint = inputSource.hand.get('wrist');
+          const wristPose = frame.getJointPose(wristJoint, xrRefSpace);
+          if (wristPose) {
+            // Calculate forward direction based on wrist orientation
+            const forward = vec3.fromValues(0, 0, -1); // Assuming forward is -Z
+            const wristOrientation = wristPose.transform.orientation;
+            vec3.transformQuat(forward, forward, wristOrientation);
+
+            // Use the spaceship's position as the starting point for the missile
+            const spaceshipPosition = getSpaceshipPosition();
+
+            // Launch the missile from the spaceship's position in the forward direction
+            createMissileFromSpaceship();
+
+
+            // Update the last missile launch time
+            lastMissileLaunchTime = performance.now();
+          }
+        }
 
         return touching;
     }
@@ -580,6 +606,120 @@
         // Assuming the cube is placed 2 units in front of the user
         updateOrCreateRedBoxWithRotation(1, -0.5, 0, orientation, deltaTime);
     }
+
+    function createMissileFromSpaceship() {
+      const spaceshipPosition = getSpaceshipPosition(); // Get the spaceship's current position
+      if (!redBoxNode || !redBoxNode.rotation) {
+        console.error("Spaceship node or rotation is undefined.");
+        return;
+      }
+
+      // Assuming the spaceship's forward direction is along the local -Z axis
+      let forward = vec3.fromValues(0, 0, -1);
+      // Transform the forward vector by the spaceship's rotation to get the global forward direction
+      vec3.transformQuat(forward, forward, redBoxNode.rotation);
+
+      // Ensure there's a cooldown period of 1 second between missile launches
+      if (performance.now() - lastMissileLaunchTime > 1000) {
+        createMissile(spaceshipPosition, forward); // Use the adjusted forward direction
+        lastMissileLaunchTime = performance.now(); // Update the last missile launch time
+      }
+    }
+
+    function createMissile(startPosition, direction, speed = 0.05, lifetime = 60) {
+      console.log("Creating missile: ", startPosition, direction, speed, lifetime);
+
+      // Ensure startPosition and direction are cloned or created anew to avoid reference issues
+      let missilePosition = vec3.clone(startPosition);
+      let missileDirection = vec3.clone(direction);
+
+      let missileMaterial = new PbrMaterial();
+      missileMaterial.baseColorFactor.value = [1, 0.2, 0.2, 1]; // Red missile
+
+      let boxBuilder = new BoxBuilder();
+      boxBuilder.pushCube([0, 0, 0], 1); // Create a unit cube
+      let boxPrimitive = boxBuilder.finishPrimitive(renderer);
+
+      let missileRenderPrimitive = renderer.createRenderPrimitive(boxPrimitive, missileMaterial);
+
+      let missileNode = new Node();
+      missileNode.addRenderPrimitive(missileRenderPrimitive);
+      missileNode.translation = missilePosition;
+      // Assuming you have a function to orient the missile based on its direction
+      orientMissile(missileNode, missileDirection);
+      missileNode.scale = [0.03, 0.03, 0.5]; // Elongated box to represent the missile
+
+      // Add the missile to the scene and to the missiles array
+      scene.addNode(missileNode);
+      missiles.push({
+        node: missileNode,
+        direction: direction,
+        speed: speed,
+        lifetime: lifetime,
+        currentFrame: 0
+      });
+    }
+
+    function orientMissile(missileNode, launchDirection) {
+      // Normalize the launch direction to ensure it's a unit vector
+      let normalizedLaunchDirection = vec3.normalize(vec3.create(), launchDirection);
+
+      // The default forward vector for the missile, assuming it faces along the -Z axis
+      let missileForward = vec3.fromValues(0, 0, -1);
+
+      // Calculate the rotation axis by taking the cross product of the missile's forward vector and the launch direction
+      let rotationAxis = vec3.cross(vec3.create(), missileForward, normalizedLaunchDirection);
+      vec3.normalize(rotationAxis, rotationAxis); // Normalize the rotation axis
+
+      // Calculate the angle between the missile's forward vector and the launch direction
+      let dotProduct = vec3.dot(missileForward, normalizedLaunchDirection);
+      let angle = Math.acos(dotProduct); // Angle in radians
+
+      // Create a quaternion representing the rotation from the missile's forward vector to the launch direction
+      let orientationQuaternion = quat.create();
+      if (vec3.length(rotationAxis) > 0) {
+        quat.setAxisAngle(orientationQuaternion, rotationAxis, angle);
+      } else {
+        // Special case: if the rotationAxis length is 0, it means the direction is aligned or opposite.
+        if (dotProduct < 0) {
+          // 180 degrees rotation around any orthogonal axis
+          quat.setAxisAngle(orientationQuaternion, vec3.fromValues(0, 1, 0), Math.PI);
+        } else {
+          // No rotation needed, the forward vector and launch direction are already aligned
+          quat.identity(orientationQuaternion);
+        }
+      }
+
+      // Apply the calculated orientation to the missile
+      missileNode.rotation = orientationQuaternion;
+    }
+
+    function updateMissiles() {
+      for (let i = missiles.length - 1; i >= 0; i--) {
+        let missile = missiles[i];
+        missile.currentFrame++;
+
+        // Move the missile
+        let movementVector = vec3.scale(vec3.create(), missile.direction, missile.speed);
+        vec3.add(missile.node.translation, missile.node.translation, movementVector);
+
+        // Check if the missile's lifetime has expired
+        if (missile.currentFrame >= missile.lifetime) {
+          // Remove the missile from the scene and the array
+          scene.removeNode(missile.node);
+          missiles.splice(i, 1);
+        }
+      }
+    }
+
+    // Function to get the spaceship's current position
+    // This is a placeholder - you'll need to replace it with your actual logic
+    function getSpaceshipPosition() {
+      if (redBoxNode) {
+        return redBoxNode.translation; // Assuming redBoxNode holds the spaceship
+      }
+      return [0, 0, 0]; // Default position if the spaceship is not defined
+    }
     
     function UpdateInteractables(time) {
       // Add scene objects if not present
@@ -801,6 +941,7 @@
 
         updateInputSources(session, frame, xrRefSpace, deltaTime);
         UpdateInteractables(t);
+        updateMissiles();
 
         if (frameCounter >= 30) {
             // Reset frame counter
