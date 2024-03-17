@@ -18,7 +18,7 @@
   <header>
     <details open>
       <summary>Immersive VR Session with hands</summary>
-      <p>ship go BOOM
+      <p>new and improved boom(s)
         <a class="back" href="./">Back</a>
       </p>
     </details>
@@ -51,6 +51,8 @@
     let redBoxNode = null; // This will hold the reference to the red box
     let trailParticles = [];
     let lastFrameTime = 0; // Global variable to track the last frame time
+
+    let explosions = [];
     
     // Boxes
     let boxes_left = [];
@@ -64,6 +66,7 @@
     let leftInteractionBox = null;
     let rightInteractionBox = null;
     let fingertipBoxes = { left: {}, right: {} };
+    
 
     let skyboxNode = new SkyboxNode({ url: './media/textures/milky-way-4k.png' });
 
@@ -84,7 +87,6 @@
 
     let missiles = [];
     let lastMissileLaunchTime = 0;
-
 
     let sessionType = ''; // Track the session type globally
 
@@ -209,11 +211,14 @@
     let thumbIndexTouching = false;
     let thumbPinkyTouching = false;
     let threeOrMoreFingersTouchingThumb = false;
+    let touchFrequency = 0;
+    let lastReset = 0;
 
     function checkFingerTipsTouchingThumb(frame, inputSource, xrRefSpace) {
         const touching = { thumb: false, index: false, middle: false, ring: false, pinky: false };
         const thumbTip = inputSource.hand.get('thumb-tip');
         const thumbTipPose = frame.getJointPose(thumbTip, xrRefSpace);
+        let currentTime = performance.now();
 
         if (!thumbTipPose) {
             return touching;
@@ -248,7 +253,7 @@
         threeOrMoreFingersTouchingThumb = touchingCount >= 3;
 
         // Check if thumb and index are touching and if cooldown has passed (1 second = 1000 milliseconds)
-        if (thumbIndexTouching && (performance.now() - lastMissileLaunchTime > 1000)) {
+        if (!threeOrMoreFingersTouchingThumb && thumbIndexTouching && (performance.now() - lastMissileLaunchTime > 1000)) {
           // Get the wrist joint pose for direction
           const wristJoint = inputSource.hand.get('wrist');
           const wristPose = frame.getJointPose(wristJoint, xrRefSpace);
@@ -262,15 +267,52 @@
             const spaceshipPosition = getSpaceshipPosition();
 
             // Launch the missile from the spaceship's position in the forward direction
-            createMissileFromSpaceship();
+            createMissileFromSpaceship(frame.session, xrRefSpace);
 
 
             // Update the last missile launch time
             lastMissileLaunchTime = performance.now();
           }
         }
+        //console.log(touchFrequency);
+        if (threeOrMoreFingersTouchingThumb) { 
+            console.log("Three or more fingers are touching the thumb.");
+            touchFrequency++;// Replace with the actual function you want to call
+        }else{
+            if (touchFrequency > 0) {
+                touchFrequency--;
+            }
+        }
+
+        if (touchFrequency > 12) {
+            resetSpaceshipToWristPosition(inputSource, frame, xrRefSpace); 
+        }
 
         return touching;
+    }
+
+    function resetSpaceshipToWristPosition(inputSource, frame, xrRefSpace) {
+      //console.log("old spaceship position: ", redBoxNode.translation);
+        if (inputSource.hand && inputSource.handedness === 'right') {
+            const wristJoint = inputSource.hand.get('wrist');
+            const wristPose = frame.getJointPose(wristJoint, xrRefSpace);
+            if (wristPose) {
+                // Assuming redBoxNode is the spaceship
+                if (performance.now() - lastReset > 3000) {
+                    //reset spaceship position to 0,0,0
+                    //redBoxNode.translation = [0, 0, 0];
+                    createExplosion(redBoxNode.translation[0], redBoxNode.translation[1], redBoxNode.translation[2], 3);
+                    redBoxNode.translation = [wristPose.transform.position.x, wristPose.transform.position.y, wristPose.transform.position.z];
+        
+                    lastReset = performance.now();
+                    console.log("Spaceship position reset to right wrist position: ", redBoxNode.translation);
+                }
+            } else {
+                console.error("Failed to obtain wrist pose.");
+            }
+        } else {
+            console.error("Right hand input source not found or does not have a wrist joint.");
+        }
     }
 
     // Checks to see if WebXR is available and, if so, queries a list of
@@ -381,6 +423,16 @@
         }
       });
 
+      /*
+
+      session.requestReferenceSpace('viewer').then((refSpace) => {
+          xrViewerSpace = refSpace;
+          session.requestHitTestSource({ space: xrViewerSpace }).then((hitTestSource) => {
+            xrHitTestSource = hitTestSource;
+          });
+        });
+      */
+
       // Create a WebGL context to render with, initialized to be compatible
       // with the XRDisplay we're presenting to.
       gl = createWebGLContext({
@@ -392,6 +444,7 @@
       renderer = new Renderer(gl);
 
       initHands();
+      
 
       // Set the scene's renderer, which creates the necessary GPU resources.
       scene.setRenderer(renderer);
@@ -550,14 +603,15 @@
                 if (frameCounter % 10 === 0) {
                   const touchingMap = checkFingerTipsTouchingThumb(frame, inputSource, xrRefSpace);
                   if (thumbIndexTouching) {
-                    console.log("Thumb and index finger are touching.");
+                    //console.log("Thumb and index finger are touching.");
                   }
                   if (thumbPinkyTouching) {
-                    console.log("Thumb and pinky finger are touching.");
+                    //console.log("Thumb and pinky finger are touching.");
                   }
                   if (threeOrMoreFingersTouchingThumb) {
-                    console.log("Three or more fingers are touching the thumb.");
+                    //console.log("Three or more fingers are touching the thumb.");
                   }
+                  //console.log("Spaceship coordinates: ", redBoxNode.translation);
                 }
                 
                 const palmJoints = ["wrist", "thumb-metacarpal", "index-finger-metacarpal", 
@@ -607,7 +661,7 @@
         updateOrCreateRedBoxWithRotation(1, -0.5, 0, orientation, deltaTime);
     }
 
-    function createMissileFromSpaceship() {
+    function createMissileFromSpaceship(session, xrRefSpace) {
       const spaceshipPosition = getSpaceshipPosition(); // Get the spaceship's current position
       if (!redBoxNode || !redBoxNode.rotation) {
         console.error("Spaceship node or rotation is undefined.");
@@ -621,17 +675,28 @@
 
       // Ensure there's a cooldown period of 1 second between missile launches
       if (performance.now() - lastMissileLaunchTime > 1000) {
-        createMissile(spaceshipPosition, forward); // Use the adjusted forward direction
+        createMissile(spaceshipPosition, forward, session, xrRefSpace); // Use the adjusted forward direction
         lastMissileLaunchTime = performance.now(); // Update the last missile launch time
       }
     }
 
-    function createMissile(startPosition, direction, speed = 0.05, lifetime = 60) {
+    async function createMissile(startPosition, direction, session, xrRefSpace) {
+      let speed = 0.05;
+      let lifetime = 60;
       console.log("Creating missile: ", startPosition, direction, speed, lifetime);
-
-      // Ensure startPosition and direction are cloned or created anew to avoid reference issues
+      
       let missilePosition = vec3.clone(startPosition);
       let missileDirection = vec3.clone(direction);
+      
+      let xrrayOrigin = new DOMPointReadOnly(startPosition[0], startPosition[1], startPosition[2], 1.0);
+      let xrrayDirection = new DOMPointReadOnly(direction[0], direction[1], direction[2], 0.0); // w is 0 for direction
+
+      let missileRay = new XRRay(xrrayOrigin, xrrayDirection);
+
+      console.log("Creating XRRay: ", missileRay.origin, missileRay.direction);
+      // Request a hit test source for the missile
+      const missileHitTestSource = await session.requestHitTestSource({ space: xrRefSpace, offsetRay: missileRay });
+
 
       let missileMaterial = new PbrMaterial();
       missileMaterial.baseColorFactor.value = [1, 0.2, 0.2, 1]; // Red missile
@@ -656,7 +721,9 @@
         direction: direction,
         speed: speed,
         lifetime: lifetime,
-        currentFrame: 0
+        currentFrame: 0,
+        missileHitTestSource: missileHitTestSource,
+        finalLocation: null,
       });
     }
 
@@ -694,14 +761,54 @@
       missileNode.rotation = orientationQuaternion;
     }
 
-    function updateMissiles() {
+    async function updateMissiles(session, frame, refSpace) {
+      //console.log("Updating missiles");
+
       for (let i = missiles.length - 1; i >= 0; i--) {
         let missile = missiles[i];
         missile.currentFrame++;
 
+        // Skip the missile if it already has a final location
+        if (missile.finalLocation) {
+            //has final location already
+        }else{
+          // Check for hits
+          //console.log("hitTestSource: "+missile.missileHitTestSource);
+          if (missile.missileHitTestSource) {
+            //console.log("Checking for hits");
+            const hitTestResults = frame.getHitTestResults(missile.missileHitTestSource);
+            if (hitTestResults.length > 0) {
+                const hit = hitTestResults[0];
+                const hitPose = hit.getPose(xrRefSpace);
+                console.log("Hit test result: ", hitPose.transform.position, hitPose.transform.orientation);
+                createExplosion(hitPose.transform.position.x, hitPose.transform.position.y, hitPose.transform.position.z, 1);
+                // Store the hit location as the missile's final location
+                missile.finalLocation = hitPose.transform.position;
+
+
+            }else{
+              //console.log("No hit test results");
+            }
+            
+            // Mark the hit test source for deletion
+            missile.missileHitTestSource.cancel();
+            missile.missileHitTestSource = null;
+          }
+        }
+
         // Move the missile
         let movementVector = vec3.scale(vec3.create(), missile.direction, missile.speed);
         vec3.add(missile.node.translation, missile.node.translation, movementVector);
+
+        //TODO here goes hit test. We need to somehow have the missles all added to the hit test source itself with offsetRay XRRays, and then calculate
+        // Check if the missile has reached its final location
+        if (missileReachedFinalLocation(missile)) {
+            // Trigger explosion or delete the missile
+            //create explosion at missiles x y z
+            //createExplosion(missile.finalLocation[0], missile.finalLocation[1], missile.finalLocation[2], );
+            //console.log("Missile reached final location: ", missile.finalLocation);
+            missiles.splice(i, 1);
+        }
 
         // Check if the missile's lifetime has expired
         if (missile.currentFrame >= missile.lifetime) {
@@ -712,6 +819,78 @@
       }
     }
 
+    function missileReachedFinalLocation(missile) {
+      if (missile.finalLocation) {
+        let distance = vec3.distance(missile.node.translation, missile.finalLocation);
+        return distance < 0.2; // Replace with your desired distance threshold
+      }
+      return false;
+    }
+
+    class Explosion {
+      constructor(x, y, z, size) {
+        console.log("Creating explosion at ", x, y, z);
+        this.position = [x, y, z];
+        this.size = 1; // Initial size
+        this.maxSize = size; // Maximum size before it starts shrinking
+        this.shrinkRate = 0.035; // Rate at which the explosion shrinks per frame
+        this.growthRate = 0.2; // Rate at which the explosion grows per frame
+        this.isShrinking = false; // Flag to start shrinking
+
+        
+      let explosionMaterial = new PbrMaterial();
+      explosionMaterial.baseColorFactor.value = [1, 1, 0, 1]; // Red missile
+
+      let boxBuilder = new BoxBuilder();
+      boxBuilder.pushCube([0, 0, 0], 1); // Create a unit cube
+      let boxPrimitive = boxBuilder.finishPrimitive(renderer);
+
+      let explosionRenderPrimitive = renderer.createRenderPrimitive(boxPrimitive, explosionMaterial);
+
+        // Create explosion node
+        this.node = new Node();
+        this.node.addRenderPrimitive(explosionRenderPrimitive); // Yellow color
+        this.node.scale = [this.size, this.size, this.size];
+        this.node.translation = this.position;
+        scene.addNode(this.node);
+      }
+
+      update() {
+        //console.log("Updating explosion with size: ", this.size);
+        if (this.size < this.maxSize && !this.isShrinking) {
+          this.size += this.growthRate;
+        } else {
+          this.isShrinking = true;
+          this.size -= this.shrinkRate;
+        }
+
+        // Update the size of the explosion
+        this.node.scale = [this.size, this.size, this.size];
+
+        // Remove the explosion if it's too small
+        if (this.size <= 0.1) {
+          scene.removeNode(this.node);
+          return true; // Indicate that the explosion should be removed from the array
+        }
+        return false; // Explosion is still active
+      }
+    }
+
+    function createExplosion(x, y, z, size) {
+      explosions.push(new Explosion(x, y, z, size));
+    }
+
+    function updateExplosions(deltaTime) {
+      for (let i = explosions.length - 1; i >= 0; i--) {
+        let explosionRemoved = explosions[i].update();
+        if (explosionRemoved) {
+          explosions.splice(i, 1);
+        }
+      }
+    }
+
+
+
     // Function to get the spaceship's current position
     // This is a placeholder - you'll need to replace it with your actual logic
     function getSpaceshipPosition() {
@@ -721,7 +900,7 @@
       return [0, 0, 0]; // Default position if the spaceship is not defined
     }
     
-    function UpdateInteractables(time) {
+    function updateInteractables(time) {
       // Add scene objects if not present
       /*
       if (!interactionBox) {	
@@ -940,8 +1119,9 @@
         session.requestAnimationFrame(onXRFrame);
 
         updateInputSources(session, frame, xrRefSpace, deltaTime);
-        UpdateInteractables(t);
-        updateMissiles();
+        updateInteractables(t);
+        updateMissiles(session, frame, xrRefSpace);
+        updateExplosions(deltaTime);
 
         if (frameCounter >= 30) {
             // Reset frame counter
